@@ -1,28 +1,14 @@
 #!/bin/bash
 
-#SBATCH --job-name=slotcon_coco_r50_800ep
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --gres=gpu:4
-#SBATCH --account=MST113268
-#SBATCH --partition=gp4d
-
-
-module load miniforge
-conda activate yonghonglin
-
 set -e
 set -x
 
-data_dir="/home/mmlab206/coco2017"
-output_dir="./output/sfa_v4_sigma1_slotcon_coco_r50_800ep"
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 12345 --nproc_per_node=4 \
     main_pretrain_sfa.py \
     --dataset COCO \
-    --data-dir ${data_dir} \
-    --output-dir ${output_dir} \
+    --data-dir "./coco2017" \
+    --output-dir "./output/SlotFA_coco_r50_800epbs512" \
     \
     --arch resnet50 \
     --dim-hidden 4096 \
@@ -41,6 +27,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 12345 --nproc_per_node=4 \
     --fp16 \
     \
     --print-freq 1 \
-    --save-freq 20 \
+    --save-freq 10 \
     --auto-resume \
     --num-workers 8
