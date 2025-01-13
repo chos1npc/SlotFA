@@ -14,8 +14,8 @@ import torch.backends.cudnn as cudnn
 from data.datasets import ImageFolder
 from data.transforms import CustomDataAugmentation
 
-from models import resnet
-from models.slotcon import SlotCon
+from models import slotfa_resnet as resnet
+from models.SlotFA import SlotFA
 from utils.lars import LARS
 from utils.logger import setup_logger
 from utils.lr_scheduler import get_scheduler
@@ -24,7 +24,7 @@ from utils.util import AverageMeter
 model_names = sorted(name for name in resnet.__all__ if name.islower() and callable(resnet.__dict__[name]))
 
 def get_parser():
-    parser = argparse.ArgumentParser('SlotCon')
+    parser = argparse.ArgumentParser('SlotFA')
 
     # dataset
     parser.add_argument('--dataset', type=str, default='COCO', choices=['COCO', 'COCOplus', 'ImageNet'], help='dataset type')
@@ -72,7 +72,7 @@ def get_parser():
 
 def build_model(args):
     encoder = resnet.__dict__[args.arch]
-    model = SlotCon(encoder, args).cuda()
+    model = SlotFA(encoder, args).cuda()
 
     if args.optimizer == 'sgd':
         optimizer = torch.optim.SGD(
@@ -184,6 +184,8 @@ def main(args):
 def train(train_loader, model, optimizer, scaler, scheduler, epoch, args):
     batch_time = AverageMeter()
     loss_meter = AverageMeter()
+    ori_loss_meter = AverageMeter()
+    aug_loss_meter = AverageMeter()
     # switch to train mode
     model.train()
 
@@ -198,8 +200,7 @@ def train(train_loader, model, optimizer, scaler, scheduler, epoch, args):
 
         # compute output and loss
         with torch.cuda.amp.autocast(scaler is not None):
-            # loss = model((aug_guide_features, coords, flags))
-            loss = model((crops, coords, flags))
+            ori_loss, aug_loss, loss = model((crops, coords, flags), epoch)
         
         optimizer.zero_grad()
         if args.fp16:
@@ -214,6 +215,8 @@ def train(train_loader, model, optimizer, scaler, scheduler, epoch, args):
 
         # avg loss from batch size
         loss_meter.update(loss.item(), crops[0].size(0))
+        ori_loss_meter.update(ori_loss.item(), crops[0].size(0))
+        aug_loss_meter.update(aug_loss.item(), crops[0].size(0))
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
@@ -225,7 +228,9 @@ def train(train_loader, model, optimizer, scaler, scheduler, epoch, args):
                 f'Train: [{epoch}/{args.epochs}][{i}/{train_len}]  '
                 f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.4f}  '
                 f'time {batch_time.val:.4f} ({batch_time.avg:.4f})  '
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})  ')
+                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})  '
+                f'ori_loss {ori_loss_meter.val:.4f} ({ori_loss_meter.avg:.4f})  '
+                f'aug_loss {aug_loss_meter.val:.4f} ({aug_loss_meter.avg:.4f})')
 
 
 if __name__ == '__main__':
@@ -241,7 +246,7 @@ if __name__ == '__main__':
     # setup logger
     os.makedirs(args.output_dir, exist_ok=True)
     logger = setup_logger(output=args.output_dir,
-                          distributed_rank=dist.get_rank(), name="slotcon")
+                          distributed_rank=dist.get_rank(), name="slotfa")
     if dist.get_rank() == 0:
         path = os.path.join(args.output_dir, "config.json")
         with open(path, 'w') as f:

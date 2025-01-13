@@ -5,7 +5,7 @@ set -x
 
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --master_port 12345 --nproc_per_node=4 \
-    main_pretrain_sfa.py \
+    main_pretrain.py \
     --dataset COCO \
     --data-dir "./coco2017" \
     --output-dir "./output/SlotFA_coco_r50_800epbs512" \

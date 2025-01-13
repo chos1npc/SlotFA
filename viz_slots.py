@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 from data.datasets import ImageFolder
 from models import resnet
-from models.slotcon import SlotConEval
+from models.SlotFA import SlotFAEval
 
 def denorm(img):
     mean, val = torch.tensor([0.485, 0.456, 0.406]), torch.tensor([0.229, 0.224, 0.225])
@@ -19,7 +19,7 @@ def denorm(img):
 
 def get_model(args):
     encoder = resnet.__dict__[args.arch]
-    model = SlotConEval(encoder, args)
+    model = SlotFAEval(encoder, args)
     checkpoint = torch.load(args.model_path, map_location='cpu')
     weights = {k.replace('module.', ''):v for k, v in checkpoint['model'].items()}
     model.load_state_dict(weights, strict=False)

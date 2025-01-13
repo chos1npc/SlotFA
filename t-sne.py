@@ -11,7 +11,7 @@ from sklearn.manifold import TSNE
 
 from data.datasets import ImageFolder
 from models import resnet
-from models.slotcon import SlotConEval
+from models.SlotFA import SlotFAEval
 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -25,7 +25,7 @@ def denorm(img):
 def get_model(args):
     """ 載入並建立 SlotConEval 模型 """
     encoder = resnet.__dict__[args.arch]
-    model = SlotConEval(encoder, args)
+    model = SlotFAEval(encoder, args)
     checkpoint = torch.load(args.model_path, map_location='cpu')
     # 移除 "module." 這類前綴
     weights = {k.replace('module.', ''): v for k, v in checkpoint['model'].items()}

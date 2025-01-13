@@ -224,7 +224,7 @@ class SemanticGrouping(nn.Module):
      
         return slots, dots
 
-class SlotCon(nn.Module):
+class SlotFA(nn.Module):
     def __init__(self, encoder, args):
         super().__init__()
 
@@ -424,7 +424,7 @@ def concat_all_gather(tensor):
     output = torch.cat(tensors_gather, dim=0)
     return output
 
-class SlotConEval(nn.Module):
+class SlotFAEval(nn.Module):
     def __init__(self, encoder, args):
         super().__init__()
 
