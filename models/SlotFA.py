@@ -263,7 +263,7 @@ class SlotFA(nn.Module):
         self.grouping_q = SemanticGrouping(self.num_prototypes, self.dim_out, self.teacher_temp)
         self.grouping_k = SemanticGrouping(self.num_prototypes, self.dim_out, self.teacher_temp)
         self.predictor_slot = DINOHead(self.dim_out, hidden_dim=self.dim_hidden, bottleneck_dim=self.dim_out)
-        self.simple_fa = SimpleFA_SelectAug()
+        self.simple_fa = SimpleFA()
         nn.SyncBatchNorm.convert_sync_batchnorm(self.predictor_slot)
             
         for param_q, param_k in zip(self.grouping_q.parameters(), self.grouping_k.parameters()):
