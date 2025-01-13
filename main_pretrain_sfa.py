@@ -15,7 +15,7 @@ from data.datasets import ImageFolder
 from data.transforms import CustomDataAugmentation
 
 from models import sfa_resnet as resnet
-from models.sfa_slotcon_v4 import SlotCon
+from models.sfa_slotcon import SlotCon
 from utils.lars import LARS
 from utils.logger import setup_logger
 from utils.lr_scheduler import get_scheduler

@@ -6,7 +6,7 @@ import torch.distributed as dist
 import torchvision
 import numpy as np
 import matplotlib.pyplot as plt
-
+import random
 
 class DINOHead(nn.Module):
     def __init__(self, in_dim, use_bn=True, nlayers=3, hidden_dim=4096, bottleneck_dim=256):
@@ -132,6 +132,76 @@ class SimpleFA(nn.Module):
         x = x_aug
         return x
 
+class SimpleFA_SelectAug(nn.Module):
+    def __init__(self, sigma1=0.5, sigma2=0.5):
+        super(SimpleFA_SelectAug, self).__init__()
+        self.sigma1 = sigma1
+        self.sigma2 = sigma2
+
+    def forward(self, x, slot_assign):
+        # 獲取批次中實際被分配到的槽
+        assigned_slots = self.get_assigned_slots(slot_assign)
+
+        # 在已分配的槽中隨機選擇 50% 進行增強
+        augment_slots = self.select_slots_to_augment(assigned_slots)
+
+        # 為所有槽生成增強參數（增強槽和非增強槽）
+        slot_noises = self.generate_slot_noises(augment_slots, x.device)
+
+        # 同步槽的增強參數到所有 GPU 上
+        # for slot in slot_noises:
+        #     slot_noises[slot] = self.sync_across_gpus(slot_noises[slot])
+
+        # 應用增強到特徵（使用向量化操作）
+        x = self.apply_slot_noises(x, slot_assign, slot_noises)
+        return x
+
+    def get_assigned_slots(self, slot_assign):
+        assigned_slots = torch.unique(slot_assign)
+        return assigned_slots.tolist()
+
+    def select_slots_to_augment(self, assigned_slots):
+        num_slots = len(assigned_slots)
+        num_augment = int(num_slots * 0.75)
+        augment_slots = random.sample(assigned_slots, num_augment)
+        return augment_slots
+
+    def generate_slot_noises(self, augment_slots, device):
+        slot_noises = {}
+        for slot in range(256):
+            if slot in augment_slots:
+                alpha = torch.normal(mean=1.0, std=self.sigma1, size=(256,), device=device)
+                beta = torch.normal(mean=0.0, std=self.sigma2, size=(256,), device=device)
+            else:
+                alpha = torch.ones(256, device=device)
+                beta = torch.zeros(256, device=device)
+            slot_noises[slot] = (alpha, beta)
+        return slot_noises
+
+    def sync_across_gpus(self, tensor_tuple):
+        alpha, beta = tensor_tuple
+        dist.broadcast(alpha, src=0)
+        dist.broadcast(beta, src=0)
+        return alpha, beta
+
+    def apply_slot_noises(self, x, slot_assign, slot_noises):
+        batch_size, channels, height, width = x.shape
+        # 將 x 攤平成 (batch_size * height * width, channels)
+        x_flat = x.permute(0, 2, 3, 1).reshape(-1, channels)
+        # 將 slot_assign 攤平成 (batch_size * height * width,)
+        slot_assign_flat = slot_assign.reshape(-1)
+        # 創建 alpha 和 beta 矩陣
+        alpha = torch.stack([slot_noises[slot][0] for slot in range(256)], dim=0)
+        beta = torch.stack([slot_noises[slot][1] for slot in range(256)], dim=0)
+        # 根據 slot_assign_flat 獲取對應的 alpha 和 beta
+        alpha_assigned = alpha[slot_assign_flat]
+        beta_assigned = beta[slot_assign_flat]
+        # 應用增強
+        x_aug_flat = alpha_assigned * x_flat + beta_assigned
+        # 恢復 x_aug 的形狀
+        x_aug = x_aug_flat.reshape(batch_size, height, width, channels).permute(0, 3, 1, 2)
+        return x_aug
+
 class SemanticGrouping(nn.Module):
     def __init__(self, num_slots, dim_slot, temp=0.07, eps=1e-6):
         super().__init__()
@@ -193,7 +263,7 @@ class SlotCon(nn.Module):
         self.grouping_q = SemanticGrouping(self.num_prototypes, self.dim_out, self.teacher_temp)
         self.grouping_k = SemanticGrouping(self.num_prototypes, self.dim_out, self.teacher_temp)
         self.predictor_slot = DINOHead(self.dim_out, hidden_dim=self.dim_hidden, bottleneck_dim=self.dim_out)
-        self.simple_fa = SimpleFA()
+        self.simple_fa = SimpleFA_SelectAug()
         nn.SyncBatchNorm.convert_sync_batchnorm(self.predictor_slot)
             
         for param_q, param_k in zip(self.grouping_q.parameters(), self.grouping_k.parameters()):
@@ -266,35 +336,68 @@ class SlotCon(nn.Module):
         logits = torch.einsum('nc,mc->nm', [F.normalize(self.predictor_slot(q[idxs_q]), dim=1), concat_all_gather(k)[idxs_k]]) / tau    #計算出共有的slot的logits
         labels = mask_k.cumsum(0)[idxs_q + N * torch.distributed.get_rank()] - 1    #計算出共有的slot的label
         # print("logits shape:", logits.shape, "labels shape:", labels.shape) #logits shape: torch.Size([1031, 7403]) labels shape: torch.Size([1031])
+        return F.cross_entropy(logits, labels) * (2 * tau)
+    
+    def aug_ctr_loss_filtered(self, q, k, score_q, score_k, tau=0.2):
+        # print("before flatten q shape:", q.shape, "before flatten k shape:", k.shape)
+        # before flatten q shape: torch.Size([128, 256, 256]) before flatten k shape: torch.Size([128, 256, 256]) batch_size, num_slots, dim_slot
+        q = q.flatten(0, 1)
+        k = F.normalize(k.flatten(0, 1), dim=1)
+        # print("after flatten q shape:", q.shape, "after flatten k shape:", k.shape)
+        # after flatten q shape: torch.Size([32768, 256]) after flatten k shape: torch.Size([32768, 256])
+        # print("attention map q shape:", score_q.shape, "attention map k shape:", score_k.shape)   #attention map q shape: torch.Size([128, 256, 7, 7]) attention map k shape: torch.Size([128, 256, 7, 7])
+        mask_q = (torch.zeros_like(score_q).scatter_(1, score_q.argmax(1, keepdim=True), 1).sum(-1).sum(-1) > 0).long().detach()    #計算出每個slot的mask 
+        mask_k = (torch.zeros_like(score_k).scatter_(1, score_k.argmax(1, keepdim=True), 1).sum(-1).sum(-1) > 0).long().detach()
+        # print("mask q shape:", mask_q.shape, "mask k shape:", mask_k.shape) #mask q shape: torch.Size([128, 256]) mask k shape: torch.Size([128, 256])
+        mask_intersection = (mask_q * mask_k).view(-1)  #計算出兩視圖共有的slot
+        # print("original mask intersection shape:", (mask_q*mask_k).shape)
+        # print("mask intersection shape:", mask_intersection.shape)  #mask intersection shape: torch.Size([32768])
+        idxs_q = mask_intersection.nonzero().squeeze(-1)    #取出共有的slot的index
+        # print("idxs q shape:", idxs_q.shape)
+
+        mask_k = concat_all_gather(mask_k.view(-1)) #將mask_k的值擴展到所有GPU
+        # print("mask k shape:", mask_k.shape) #mask k shape: torch.Size([65536])
+        idxs_k = mask_k.nonzero().squeeze(-1)   #取出所有slot的index
+        # print("idxs k shape:", idxs_k.shape)
+        N = k.shape[0]
+        with torch.no_grad():
+            logits = torch.einsum('nc,mc->nm', [F.normalize(self.predictor_slot(q[idxs_q]), dim=1), concat_all_gather(k)[idxs_k]]) / tau    #計算出共有的slot的logits
+        labels = mask_k.cumsum(0)[idxs_q + N * torch.distributed.get_rank()] - 1    #計算出共有的slot的label
+        # print("logits shape:", logits.shape, "labels shape:", labels.shape) #logits shape: torch.Size([1031, 7403]) labels shape: torch.Size([1031])
         return F.cross_entropy(logits, labels) * (2 * tau) 
 
     def forward(self, input, epoch):
         crops, coords, flags = input
-        #sfa_v0 simple augument on c4 or c5 or proj
+        #sfa_v4 simple augument on proj and alignment both teacher,student and teacher,aug student 
         x1, x2 = self.projector_q(self.encoder_q(crops[0], self.grouping_q, self.projector_q)), self.projector_q(self.encoder_q(crops[1], self.grouping_q, self.projector_q))
         with torch.no_grad():  # no gradient to keys
             self._momentum_update_key_encoder()  # update the key encoder
             y1, y2 = self.projector_k(self.encoder_k(crops[0])), self.projector_k(self.encoder_k(crops[1]))
-        with torch.no_grad():
-            (q1, score_q1), (q2, score_q2) = self.grouping_q(x1), self.grouping_q(x2)
-        x1, x2 = self.simple_fa(x1, score_q1.argmax(dim=1)), self.simple_fa(x2, score_q2.argmax(dim=1))
-        
+
         (q1, score_q1), (q2, score_q2) = self.grouping_q(x1), self.grouping_q(x2)
         q1_aligned, q2_aligned = self.invaug(score_q1, coords[0], flags[0]), self.invaug(score_q2, coords[1], flags[1])
+
         with torch.no_grad():
             (k1, score_k1), (k2, score_k2) = self.grouping_k(y1), self.grouping_k(y2)
             k1_aligned, k2_aligned = self.invaug(score_k1, coords[0], flags[0]), self.invaug(score_k2, coords[1], flags[1])
-            
         
-        loss = self.group_loss_weight * self.self_distill(q1_aligned.permute(0, 2, 3, 1).flatten(0, 2), k2_aligned.permute(0, 2, 3, 1).flatten(0, 2)) \
+        # augmentations for the key encoder
+        aug_x1, aug_x2 = self.simple_fa(x1, score_q1.argmax(dim=1)), self.simple_fa(x2, score_q2.argmax(dim=1))
+        with torch.no_grad():
+            (aug_q1, score_aug_q1), (aug_q2, score_aug_q2) = self.grouping_q(aug_x1), self.grouping_q(aug_x2)
+            aug_q1_aligned, aug_q2_aligned = self.invaug(score_aug_q1, coords[0], flags[0]), self.invaug(score_aug_q2, coords[1], flags[1])
+        
+        ori_loss = self.group_loss_weight * self.self_distill(q1_aligned.permute(0, 2, 3, 1).flatten(0, 2), k2_aligned.permute(0, 2, 3, 1).flatten(0, 2)) \
              + self.group_loss_weight * self.self_distill(q2_aligned.permute(0, 2, 3, 1).flatten(0, 2), k1_aligned.permute(0, 2, 3, 1).flatten(0, 2))
-
+        aug_loss = self.group_loss_weight * self.self_distill(aug_q1_aligned.permute(0, 2, 3, 1).flatten(0, 2), k2_aligned.permute(0, 2, 3, 1).flatten(0, 2)) \
+             + self.group_loss_weight * self.self_distill(aug_q2_aligned.permute(0, 2, 3, 1).flatten(0, 2), k1_aligned.permute(0, 2, 3, 1).flatten(0, 2))
+        
         self.update_center(torch.cat([score_k1, score_k2]).permute(0, 2, 3, 1).flatten(0, 2))
 
-        loss += (1. - self.group_loss_weight) * self.ctr_loss_filtered(q1, k2, score_q1, score_k2) \
-              + (1. - self.group_loss_weight) * self.ctr_loss_filtered(q2, k1, score_q2, score_k1)
         
-        return loss
+        loss = ori_loss + aug_loss
+
+        return ori_loss, aug_loss, loss
     
     @torch.no_grad()
     def update_center(self, teacher_output):
