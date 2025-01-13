@@ -1,7 +1,5 @@
 # Self-Supervised Learning with Generalized Slot Representation
 
-# Introduction
-
 <p align="center">
 <img src="Images/framework.png" width="850"/>
 </p>
