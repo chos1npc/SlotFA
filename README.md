@@ -46,7 +46,7 @@ pip install -r requirements.txt
 ```
 
 ### Run pre-training
-By default, we train with DDP over 8 GPUs on a single machine. The following are some examples of re-implementing SlotCon pre-training on COCO and ImageNet:
+By default, we train with DDP over 4 GPUs on a single machine. The following are some examples of re-implementing SlotFA pre-training on COCO:
 
 * Train SlotFA on COCO for 800 epochs
 ```shell script
