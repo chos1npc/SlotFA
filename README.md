@@ -1,7 +1,7 @@
 # Self-Supervised Learning with Generalized Slot Representation
 
 <p align="center">
-<img src="Images/overview.png" width="850"/>
+
 </p>
 
 This is the official PyTorch implementation of Self-Supervised Learning with Generalized Slot Representation
